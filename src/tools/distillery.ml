@@ -154,8 +154,7 @@ let create_project ~name ~env ~preds ~source_dir ~destination_dir =
       exit 1 );
   Array.iter
     (fun src_file ->
-      if src_file = reserve_project_name_filename then ()
-      else
+      if src_file <> ".git" && src_file <> reserve_project_name_filename then
         let src_path = Filename.concat source_dir src_file in
         let dst_path =
           let dst_file = Str.(global_replace (regexp (quote "PROJECT_NAME")) name src_file) in
@@ -163,6 +162,7 @@ let create_project ~name ~env ~preds ~source_dir ~destination_dir =
           Filename.concat destination_dir (join_path dst_file_path)
         in
         copy_file ~env ~preds src_path dst_path
+      else ()
     )
     (Sys.readdir source_dir)
 
@@ -201,15 +201,11 @@ let get_templates () =
       | End_of_file -> Unix.closedir dir; rl
   in aux []
 
-(* ------------------------------------------ *)
-(* ---------- Reserve project name ---------- *)
-
 (* Check if the project name is valid for the given template. For example,
  * options is not a valid project name for basic.ppx. It is supposed each
  * template has a file {!reserve_project_name_filename} file containing the
  * list of reserve project name (one name a line).
  *)
-
 let check_reserve_project_name project_name template_name =
   let file = Filename.concat
     (Filename.concat (get_templatedir ()) template_name)
@@ -230,8 +226,51 @@ let check_reserve_project_name project_name template_name =
   else
     false
 
-(* ---------- Reserve project name ---------- *)
-(* ------------------------------------------ *)
+(* ----------------------------------------------- *)
+(* ---------- Remove and add a template ---------- *)
+
+(* Check if a template id exists *)
+let template_id_exists template_id =
+  template_id <> "" &&
+  (Sys.file_exists (Filename.concat (get_templatedir ()) template_id))
+
+(* Add a new template with the id [template_id] cloned from [url] *)
+(* FIXME: security like template_id = ../../hello *)
+let add_git_template_fn url template_id =
+  if url = "" then
+    printf "You need to mention an url using -url with the -add-template \
+    argument.\n"
+  else if template_id = "" then
+    printf "You need to mention a template ID using -id with the -add-template \
+    argument.\n"
+  else if template_id_exists template_id then
+    printf "%s is already used.\n" template_id
+  else ignore (
+    Unix.system
+      (sprintf
+        "git clone %s %s"
+          url
+          (Filename.concat (get_templatedir ()) template_id)
+      )
+  )
+
+let template_removed = ref false
+
+(* remove the template with the id [template_id] *)
+let remove_template_fn template_id =
+  let directory = Filename.concat (get_templatedir ()) template_id in
+  let () = template_removed := true in
+  if not (template_id_exists template_id) then
+    printf "%s doesn't exist.\n" template_id
+  else
+  (
+    printf "Removing %s... " directory;
+    ignore (Unix.system (sprintf "rm -rf %s" directory));
+    printf "OK\n"
+  )
+
+(* ---------- Remove and add a template ---------- *)
+(* ----------------------------------------------- *)
 
 let init_project template name =
   env name,
@@ -250,6 +289,11 @@ let main () =
   in
   let bad fmt = Printf.ksprintf (fun s -> raise (Arg.Bad s)) fmt in
   let name = ref None in
+  (* add-template *)
+  let add_url = ref "" in
+  let add_git_template_id = ref "" in
+  let add_git_template = ref false in
+  (* add-template *)
   let template = ref distillery_basic in
   let templates = get_templates () in
   let usage_msg = gen_usage_msg templates in
@@ -273,10 +317,27 @@ let main () =
       " List all available templates";
       "-target-directory", String (fun s -> destination_dir := Some s),
       "<dir> Generate the project in directory <dir> (the project's name by default)";
+      "-rm-template", String remove_template_fn,
+      " -rm-template [template_id] Remove the template with [template_id]";
+      "-add-git-template", (Set add_git_template),
+      " Add a new template. Use -url [url] and -id [id].";
+      "-url", (Set_string add_url),
+      " The URL of the git repository containing the template needed by
+      -add-template argument";
+      "-id", (Set_string add_git_template_id),
+      " The ID of the template needed by -add-template argument";
   ]) in
   Arg.(parse spec (bad "Don't know what to do with %S") usage_msg);
   if !dir then printf "%s\n" (get_templatedir ())
+  else if !add_git_template then add_git_template_fn (!add_url) (!add_git_template_id)
+  else if
+    not (!add_git_template) &&
+    ((! add_url) <> "" || (! add_git_template_id) <> "")
+  then
+    printf "-url and -id must be only used with -add-template argument. For \
+    example eliom-distillery -add-template -url [git_url] -id [template_id].\n"
   else if !shown then ()
+  else if !template_removed then ()
   else begin
     let template, name, destination_dir =
       match !template, !name with
@@ -285,7 +346,7 @@ let main () =
           template, name, dir
       | _ -> Arg.usage spec usage_msg; exit 1
     in
-    if (check_reserve_project_name name template) then
+    if check_reserve_project_name name template then
       printf
         "'%s' is not a valid project name for the template '%s'.\n"
         name
